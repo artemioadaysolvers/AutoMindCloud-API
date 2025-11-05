@@ -7,8 +7,8 @@ steps:
   args:
     - build
     - -t
-    - us-central1-docker.pkg.dev/$PROJECT_ID/gpt-repo/gpt-proxy:$COMMIT_SHA
+    - us-central1-docker.pkg.dev/$PROJECT_ID/roboticartifact/gpt-proxy:$COMMIT_SHA
     - .
 
 images:
-- us-central1-docker.pkg.dev/$PROJECT_ID/gpt-repo/gpt-proxy:$COMMIT_SHA
+- us-central1-docker.pkg.dev/$PROJECT_ID/roboticartifact/gpt-proxy:$COMMIT_SHA
