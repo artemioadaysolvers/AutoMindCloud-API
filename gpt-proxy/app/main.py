@@ -1,106 +1,83 @@
-import os, base64, binascii
-from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
+import os 
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from openai import OpenAI
 import uvicorn
+import base64
+from io import BytesIO
+from PIL import Image
 
-# --- Configuración ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY no está configurada.")
+# Lee API key desde env (Cloud Run la inyecta desde Secret Manager)
+if not os.getenv("OPENAI_API_KEY"):
+    raise RuntimeError("OPENAI_API_KEY no está configurada en el entorno.")
 
-MODEL = os.getenv("MODEL", "gpt-4.1-mini")  # modelo con visión
-MAX_REQ_BYTES = 32 * 1024 * 1024            # límite de Cloud Run (~32 MB)
-
+MODEL = os.getenv("MODEL", "gpt-4-vision-preview")  # Usar modelo con visión
 client = OpenAI()
-app = FastAPI(title="GPT Proxy", version="1.4")
 
-# --- Schemas ---
+app = FastAPI(title="GPT Proxy", version="1.0")
+
 class InferenceIn(BaseModel):
-    text: str = Field(..., description="Prompt para el modelo")
-    image_b64: Optional[str] = Field(None, description="Imagen en base64 (sin prefijo data:)")
-    mime: Optional[str] = Field(None, description="Mime type detectado, ej: image/png")
+    text: str
+    image_b64: str  # Nuevo campo para la imagen en base64
+    mime: str = "image/png"  # MIME type por defecto
 
 class InferenceOut(BaseModel):
     model: str
     output: str
-    debug: Dict[str, Any]
 
-# --- Endpoints ---
 @app.get("/health")
 def health():
     return {"status": "ok", "model": MODEL}
 
-@app.post("/echo")
-async def echo(req: Request):
-    """Devuelve exactamente lo que llegó al backend."""
-    headers = dict(req.headers)
+def process_image_base64(image_b64: str, mime: str):
+    """Convierte base64 a datos que OpenAI puede procesar"""
     try:
-        body = await req.json()
-    except Exception:
-        body = (await req.body()).decode("utf-8", errors="replace")
-    return {"headers": headers, "body": body}
+        # Decodificar base64
+        image_data = base64.b64decode(image_b64)
+        
+        # Para modelos de visión, podemos enviar la imagen como base64 directamente
+        # o procesarla con PIL si necesitamos validación
+        image = Image.open(BytesIO(image_data))
+        
+        # Validar que es una imagen válida
+        image.verify()
+        
+        # Regresar al formato original para enviar a OpenAI
+        return image_data
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error procesando imagen: {str(e)}")
 
 @app.post("/infer", response_model=InferenceOut)
 def infer(payload: InferenceIn):
     try:
-        has_img = bool(payload.image_b64 and payload.image_b64.strip())
-        content: List[Dict[str, Any]] = [{"type": "input_text", "text": payload.text}]
-        debug = {
-            "has_image_b64": has_img,
-            "mime": payload.mime,
-            "b64_prefix": (payload.image_b64[:20] if has_img else None),
-            "approx_bytes": None,
-            "decoded_len": None,
-        }
-
-        if has_img:
-            # Estimar tamaño real
-            approx_bytes = int(len(payload.image_b64) * 0.75)
-            debug["approx_bytes"] = approx_bytes
-            if approx_bytes > MAX_REQ_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail="Imagen demasiado grande para Cloud Run (~>32MiB)."
-                )
-
-            # Validar base64
-            try:
-                img_bytes = base64.b64decode(payload.image_b64, validate=True)
-            except binascii.Error:
-                raise HTTPException(status_code=400, detail="image_b64 no es válido.")
-
-            debug["decoded_len"] = len(img_bytes)
-
-            # Si no viene MIME, intentar detectar automáticamente
-            if not payload.mime:
-                import imghdr
-                fmt = imghdr.what(None, h=img_bytes)
-                if fmt:
-                    payload.mime = f"image/{fmt}"
-                else:
-                    payload.mime = "application/octet-stream"
-
-            # Crear data URL
-            data_url = f"data:{payload.mime};base64,{payload.image_b64}"
-            content.append({"type": "input_image", "image_url": data_url})
-
-        # Llamar a Responses API
-        resp = client.responses.create(
+        # Preparar el mensaje con la imagen
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": payload.text},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{payload.mime};base64,{payload.image_b64}"
+                        }
+                    }
+                ]
+            }
+        ]
+        
+        # Llamar a OpenAI con el modelo de visión
+        response = client.chat.completions.create(
             model=MODEL,
-            input=[{"role": "user", "content": content}],
+            messages=messages,
+            max_tokens=1000
         )
-        return {
-            "model": MODEL,
-            "output": resp.output_text,
-            "debug": debug
-        }
-
-    except HTTPException:
-        raise
+        
+        out = response.choices[0].message.content
+        return {"model": MODEL, "output": out}
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Inference error: {e}")
+        raise HTTPException(status_code=500, detail="Inference error") from e
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
