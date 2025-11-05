@@ -1,6 +1,6 @@
 # main.py
 import os, base64, binascii
-rom typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from openai import OpenAI
