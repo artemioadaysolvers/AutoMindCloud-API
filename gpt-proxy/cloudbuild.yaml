@@ -1,14 +1,41 @@
-options:
-  logging: CLOUD_LOGGING_ONLY
+# cloudbuild.yaml
+substitutions:
+  _REGION: us-central1
+  _LOCATION: us-central1
+  _SERVICE: gpt-proxy
+  _AR_REPO: roboticartifact
+  _IMAGE: gpt-proxy
+  _MODEL: gpt-4.1-mini
 
 steps:
+  # 1) Build de la imagen (sin cache para evitar “fantasmas”)
   - name: gcr.io/cloud-builders/docker
-    dir: gpt-proxy
     args:
       - build
-      - -t
-      - us-central1-docker.pkg.dev/$PROJECT_ID/roboticartifact/gpt-proxy:$COMMIT_SHA
-      - .
+      - '--no-cache'
+      - '-t'
+      - '${_LOCATION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE}:$SHORT_SHA'
+      - '.'
+
+  # 2) Push a Artifact Registry
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - '${_LOCATION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE}:$SHORT_SHA'
+
+  # 3) Deploy a Cloud Run (100% tráfico a la nueva revisión)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - '${_SERVICE}'
+      - '--region=${_REGION}'
+      - '--image=${_LOCATION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE}:$SHORT_SHA'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'MODEL=${_MODEL}'
+      # Sugerencia: inyecta OPENAI_API_KEY desde Secret Manager, ver nota abajo
 
 images:
-  - us-central1-docker.pkg.dev/$PROJECT_ID/roboticartifact/gpt-proxy:$COMMIT_SHA
+  - '${_LOCATION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE}:$SHORT_SHA'
