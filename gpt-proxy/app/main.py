@@ -36,7 +36,7 @@ def infer(payload: InferenceIn):
         out = resp.output_text
 
         # Devuelve dos valores: el output y la palabra "banana"
-        return {"model": MODEL, "output": out, "bonus": "banana"}
+        return {"model": MODEL, "output": out, "bonus": "banana1"}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference error: {e}")
