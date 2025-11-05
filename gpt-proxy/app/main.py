@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
 import uvicorn
+import logging
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY no está configurada en el entorno.")
@@ -11,10 +12,12 @@ MODEL = os.getenv("MODEL", "gpt-4o-mini")  # modelo con visión
 client = OpenAI()  # usa OPENAI_API_KEY del entorno
 
 app = FastAPI(title="GPT Proxy", version="1.0")
+log = logging.getLogger("uvicorn.error")
 
 class InferenceIn(BaseModel):
     text: str
-    image_b64: str | None = None  # <-- NUEVO
+    image_b64: str | None = None  # imagen opcional en base64 (sin data URL)
+    mime: str | None = None       # opcional: "image/jpeg" o "image/png"
 
 class InferenceOut(BaseModel):
     model: str
@@ -28,24 +31,40 @@ def health():
 def infer(payload: InferenceIn):
     try:
         if payload.image_b64:
-            # Asumimos JPEG por defecto; cambia a image/png si corresponde
-            data_url = f"data:image/jpeg;base64,{payload.image_b64}"
-            resp = client.responses.create(
-                model=MODEL,
-                input=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": payload.text},
-                        {"type": "input_image", "image_url": data_url},
-                    ],
-                }],
-            )
-        else:
-            resp = client.responses.create(model=MODEL, input=payload.text)
+            # Construimos data URL con el MIME correcto (default: JPEG)
+            mime = payload.mime or "image/jpeg"
+            data_url = f"data:{mime};base64,{payload.image_b64}"
+            log.info("Rama VISIÓN: enviando imagen + texto a chat.completions")
 
-        return {"model": MODEL, "output": resp.output_text}
-    except Exception:
-        raise HTTPException(status_code=500, detail="Inference error")
+            # ✅ Camino robusto para visión: Chat Completions con image_url
+            chat = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": payload.text},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url},  # <- clave: objeto con {"url": ...}
+                            },
+                        ],
+                    }
+                ],
+                temperature=0.2,
+            )
+            out = chat.choices[0].message.content
+            return {"model": MODEL, "output": out}
+
+        # Rama solo texto
+        log.info("Rama TEXTO: sin imagen, usando responses")
+        resp = client.responses.create(model=MODEL, input=payload.text)
+        out = resp.output_text
+        return {"model": MODEL, "output": out}
+
+    except Exception as e:
+        log.exception("Inference error")
+        raise HTTPException(status_code=500, detail="Inference error") from e
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
