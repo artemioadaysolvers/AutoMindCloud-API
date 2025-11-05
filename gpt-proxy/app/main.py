@@ -5,17 +5,18 @@ from openai import OpenAI
 import uvicorn
 import logging
 
-# Setup
+# Configurar logs
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("app")
 
+# Validar clave API
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY no está configurada en el entorno.")
 
-MODEL = os.getenv("MODEL", "gpt-4o-mini")
+MODEL = os.getenv("MODEL", "gpt-4.1-mini")  # ✅ el mismo que te funciona
 client = OpenAI()
 
-app = FastAPI(title="GPT Proxy", version="2.0")
+app = FastAPI(title="GPT Proxy", version="2.1")
 
 class InferenceIn(BaseModel):
     text: str
@@ -33,7 +34,7 @@ def health():
 @app.post("/infer", response_model=InferenceOut)
 def infer(payload: InferenceIn):
     try:
-        # Si hay imagen → usa el formato “responses.create” igual que tu ejemplo
+        # Si hay imagen, usar exactamente el formato que probaste en Colab
         if payload.image_b64:
             mime = payload.mime or "image/jpeg"
             data_url = f"data:{mime};base64,{payload.image_b64}"
@@ -51,6 +52,7 @@ def infer(payload: InferenceIn):
                     }
                 ],
             )
+
         else:
             log.info(f"[TEXT] usando modelo {MODEL}")
             resp = client.responses.create(
