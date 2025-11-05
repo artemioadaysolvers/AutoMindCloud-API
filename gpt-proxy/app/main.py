@@ -1,23 +1,22 @@
-import os
+import os, logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
 import uvicorn
-import logging
 
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY no está configurada en el entorno.")
 
-MODEL = os.getenv("MODEL", "gpt-4o-mini")  # modelo con visión
-client = OpenAI()  # usa OPENAI_API_KEY del entorno
+MODEL = os.getenv("MODEL", "gpt-4o-mini")
+client = OpenAI()
 
-app = FastAPI(title="GPT Proxy", version="1.0")
+app = FastAPI(title="GPT Proxy", version="1.1")
 log = logging.getLogger("uvicorn.error")
 
 class InferenceIn(BaseModel):
     text: str
-    image_b64: str | None = None  # imagen opcional en base64 (sin data URL)
-    mime: str | None = None       # opcional: "image/jpeg" o "image/png"
+    image_b64: str | None = None
+    mime: str | None = None   # "image/jpeg" o "image/png"
 
 class InferenceOut(BaseModel):
     model: str
@@ -25,42 +24,34 @@ class InferenceOut(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": MODEL}
+    return {"status":"ok","model":MODEL}
 
 @app.post("/infer", response_model=InferenceOut)
 def infer(payload: InferenceIn):
     try:
         if payload.image_b64:
-            # Construimos data URL con el MIME correcto (default: JPEG)
             mime = payload.mime or "image/jpeg"
+            log.info(f"[VISION] mime={mime} b64_len={len(payload.image_b64)}")
             data_url = f"data:{mime};base64,{payload.image_b64}"
-            log.info("Rama VISIÓN: enviando imagen + texto a chat.completions")
 
-            # ✅ Camino robusto para visión: Chat Completions con image_url
             chat = client.chat.completions.create(
                 model=MODEL,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": payload.text},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": data_url},  # <- clave: objeto con {"url": ...}
-                            },
-                        ],
-                    }
-                ],
+                messages=[{
+                    "role":"user",
+                    "content":[
+                        {"type":"text","text": payload.text},
+                        {"type":"image_url","image_url":{"url": data_url}},
+                    ]
+                }],
                 temperature=0.2,
             )
             out = chat.choices[0].message.content
             return {"model": MODEL, "output": out}
 
-        # Rama solo texto
-        log.info("Rama TEXTO: sin imagen, usando responses")
+        # Solo texto
+        log.info("[TEXT] sin imagen")
         resp = client.responses.create(model=MODEL, input=payload.text)
-        out = resp.output_text
-        return {"model": MODEL, "output": out}
+        return {"model": MODEL, "output": resp.output_text}
 
     except Exception as e:
         log.exception("Inference error")
