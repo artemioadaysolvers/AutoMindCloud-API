@@ -6,82 +6,83 @@ from pydantic import BaseModel, Field
 from openai import OpenAI
 import uvicorn
 
-# --- Config ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY no está configurada.")
-MODEL = os.getenv("MODEL", "gpt-4.1-mini")  # modelo con visión
-MAX_REQ_BYTES = 32 * 1024 * 1024  # Límite práctico HTTP/1 en Cloud Run (~32MiB)
+
+MODEL = os.getenv("MODEL", "gpt-4.1-mini")
+MAX_REQ_BYTES = 32 * 1024 * 1024  # límite práctico Cloud Run
 
 client = OpenAI()
-app = FastAPI(title="GPT Proxy", version="1.1")
+app = FastAPI(title="GPT Proxy", version="1.2")
 
-# --- Schemas ---
 class InferenceIn(BaseModel):
     text: str = Field(..., description="Prompt para el modelo")
-    image_b64: Optional[str] = Field(None, description="Imagen en base64 (sin prefijo data:)")
-    mime: Optional[str] = Field("image/jpeg", description="Mime type, ej: image/jpeg, image/png")
+    image_b64: Optional[str] = Field(
+        None, description="Imagen en base64 (sin prefijo data:)"
+    )
+    mime: Optional[str] = Field("image/jpeg", description="image/jpeg|image/png|image/webp")
 
 class InferenceOut(BaseModel):
     model: str
     output: str
+    debug: dict
 
-# --- Health ---
 @app.get("/health")
 def health():
     return {"status": "ok", "model": MODEL}
 
-# --- Infer ---
 @app.post("/infer", response_model=InferenceOut)
 def infer(payload: InferenceIn):
     try:
-        # Validaciones mínimas
-        if payload.image_b64 is None:
-            # Solo texto -> también permitido
-            content = [{"type": "input_text", "text": payload.text}]
-        else:
-            # Estimar tamaño para cortar solicitudes demasiado grandes
-            # Aproximación: base64 ~ 4/3 del binario ⇒ bin_size ≈ len(b64) * 3/4
+        has_img = bool(payload.image_b64 and payload.image_b64.strip())
+        content = [{"type": "input_text", "text": payload.text}]
+        debug = {
+            "has_image_b64": has_img,
+            "mime": payload.mime,
+            "b64_prefix": (payload.image_b64[:16] if has_img else None),
+            "approx_bytes": None,
+            "decoded_len": None,
+        }
+
+        if has_img:
+            # Estimar tamaño (base64 ~ 4/3 binario)
             approx_bytes = int(len(payload.image_b64) * 0.75)
+            debug["approx_bytes"] = approx_bytes
             if approx_bytes > MAX_REQ_BYTES:
                 raise HTTPException(
                     status_code=413,
-                    detail="Imagen demasiado grande para esta vía (≈>32MiB)."
-                           " Sube la imagen a Cloud Storage y envía la URL."
+                    detail="Imagen demasiado grande para esta vía (~>32MiB). Usa GCS + URL."
                 )
 
-            # Decodificar base64 de forma segura
+            # Decodificar para validar que realmente llegó imagen
             try:
                 img_bytes = base64.b64decode(payload.image_b64, validate=True)
             except binascii.Error:
-                raise HTTPException(status_code=400, detail="image_b64 no es base64 válido.")
+                raise HTTPException(status_code=400, detail="image_b64 inválido (no es base64).")
+
+            debug["decoded_len"] = len(img_bytes)
 
             if payload.mime not in {"image/jpeg", "image/png", "image/webp"}:
-                # no es obligatorio, pero ayuda a los modelos
                 payload.mime = "image/jpeg"
 
-            # Construir data URL para la Responses API
             data_url = f"data:{payload.mime};base64,{payload.image_b64}"
 
-            content = [
-                {"type": "input_text", "text": payload.text},
-                {"type": "input_image", "image_url": data_url},
-            ]
+            # Añadimos SIEMPRE el bloque de imagen si llegó base64
+            content.append({"type": "input_image", "image_url": data_url})
 
-        # Llamar a la Responses API (texto/imágenes)
         resp = client.responses.create(
             model=MODEL,
             input=[{"role": "user", "content": content}],
         )
         out = resp.output_text
-        return {"model": MODEL, "output": out}
+        return {"model": MODEL, "output": out, "debug": debug}
 
     except HTTPException:
         raise
-    except Exception as e:
-        # Log interno opcional: print(e)
-        raise HTTPException(status_code=500, detail="Inference error") from e
-
+    except Exception:
+        raise HTTPException(status_code=500, detail="Inference error")
+        
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
     uvicorn.run(app, host="0.0.0.0", port=port)
