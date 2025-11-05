@@ -1,29 +1,34 @@
 import os, base64, binascii
 from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-# Lee la API key desde el entorno (Secret Manager en Cloud Run)
+# --- Configuración ---
 if not os.getenv("OPENAI_API_KEY"):
     raise RuntimeError("OPENAI_API_KEY no está configurada en el entorno.")
 
-MODEL = os.getenv("MODEL", "gpt-4.1-mini")   # modelo con visión
-MAX_REQ_BYTES = 32 * 1024 * 1024             # ~32 MiB
-
+MODEL = os.getenv("MODEL", "gpt-4.1-mini")  # modelo con visión
+MAX_REQ_BYTES = 32 * 1024 * 1024  # 32 MiB
 client = OpenAI()
-app = FastAPI(title="GPT Proxy", version="2.0-vision")
+
+app = FastAPI(title="GPT Proxy", version="3.0-multiimage")
+
+# --- Modelos Pydantic ---
+class ImageInput(BaseModel):
+    image_b64: str = Field(..., description="Imagen en base64 (sin prefijo data:)")
+    mime: Optional[str] = Field(None, description="MIME type, ej: image/jpeg, image/png")
 
 class InferenceIn(BaseModel):
-    text: str = Field(..., description="Prompt para el modelo")
-    image_b64: Optional[str] = Field(None, description="Imagen en base64 (SIN prefijo data:)")
-    mime: Optional[str] = Field(None, description="image/jpeg | image/png | image/webp, etc.")
+    text: str
+    images: Optional[List[ImageInput]] = Field(default=None, description="Lista de imágenes en base64")
 
 class InferenceOut(BaseModel):
     model: str
     output: str
-    debug: Optional[Dict[str, Any]] = None  # útil para ver tamaños, mime, etc.
+    debug: Optional[Dict[str, Any]] = None
 
+# --- Endpoints ---
 @app.get("/health")
 def health():
     return {"status": "ok", "model": MODEL}
@@ -31,42 +36,38 @@ def health():
 @app.post("/infer", response_model=InferenceOut)
 def infer(payload: InferenceIn):
     try:
-        has_img = bool(payload.image_b64 and payload.image_b64.strip())
         content: List[Dict[str, Any]] = [{"type": "input_text", "text": payload.text}]
+        debug: Dict[str, Any] = {"num_images": 0, "total_bytes": 0, "mimes": []}
 
-        debug: Dict[str, Any] = {
-            "has_image_b64": has_img,
-            "mime": payload.mime,
-            "approx_bytes": None,
-            "decoded_len": None,
-        }
+        # procesar lista de imágenes (si hay)
+        if payload.images:
+            for img in payload.images:
+                if not img.image_b64.strip():
+                    continue
 
-        if has_img:
-            # tamaño aprox (base64 es ~4/3 del binario)
-            approx_bytes = int(len(payload.image_b64) * 0.75)
-            debug["approx_bytes"] = approx_bytes
-            if approx_bytes > MAX_REQ_BYTES:
-                raise HTTPException(status_code=413, detail="Imagen demasiado grande (~>32 MiB).")
+                try:
+                    img_bytes = base64.b64decode(img.image_b64, validate=True)
+                except binascii.Error:
+                    raise HTTPException(status_code=400, detail="Una de las imágenes no es base64 válida.")
 
-            # validar base64
-            try:
-                img_bytes = base64.b64decode(payload.image_b64, validate=True)
-            except binascii.Error:
-                raise HTTPException(status_code=400, detail="image_b64 inválido (no es base64).")
+                decoded_len = len(img_bytes)
+                debug["total_bytes"] += decoded_len
+                if debug["total_bytes"] > MAX_REQ_BYTES:
+                    raise HTTPException(status_code=413, detail="Demasiados datos (~>32 MiB en total).")
 
-            debug["decoded_len"] = len(img_bytes)
+                # detectar MIME si falta
+                if not img.mime:
+                    import imghdr
+                    fmt = imghdr.what(None, h=img_bytes)
+                    img.mime = f"image/{fmt}" if fmt else "application/octet-stream"
 
-            # detectar MIME si no vino
-            if not payload.mime:
-                import imghdr
-                fmt = imghdr.what(None, h=img_bytes)  # 'jpeg','png','webp',...
-                payload.mime = f"image/{fmt}" if fmt else "application/octet-stream"
+                data_url = f"data:{img.mime};base64,{img.image_b64}"
+                content.append({"type": "input_image", "image_url": data_url})
 
-            # armar data URL para la Responses API
-            data_url = f"data:{payload.mime};base64,{payload.image_b64}"
-            content.append({"type": "input_image", "image_url": data_url})
+                debug["mimes"].append(img.mime)
+                debug["num_images"] += 1
 
-        # Llamada a OpenAI Responses API
+        # llamar al modelo
         resp = client.responses.create(
             model=MODEL,
             input=[{"role": "user", "content": content}],
