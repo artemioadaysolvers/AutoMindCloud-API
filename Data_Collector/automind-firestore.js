@@ -1,18 +1,7 @@
-// Data_Collector/automind-firestore.js
-//
-// Recibe AutoMind_Info desde AutoMindCloud/__init__.py y escribe:
-//
-// AutoMind_Data_DD-MM-AAAA
-// └── IP_xxx.xxx.xxx.xxx
-//     └── JSON
-//         └── documento automático
-//
-// El documento JSON contiene:
-//   - AutoMind_Info
-//   - User_Info
-//   - timestamp_servidor
-//
-// La ruta coincide exactamente con firestore.rules.
+// automind-firestore.js
+// Envia AutoMind_Info + User_Info a Firestore.
+// Guarda en: AutoMind_Data_DD-MM-AAAA / IP_xxx / JSON / documento
+// No escribe en consola ni muestra mensajes visuales.
 
 import {
   initializeApp,
@@ -21,21 +10,20 @@ import {
 } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js";
 
 import {
-  getFirestore,
-  collection,
-  addDoc,
-  serverTimestamp,
-  waitForPendingWrites
-} from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
-
-import {
   getAuth,
   signInAnonymously
 } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-auth.js";
 
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  serverTimestamp
+} from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
+
 
 // ============================================================
-// CONFIGURACIÓN FIREBASE
+// CONFIGURACION FIJA DEL PROYECTO
 // ============================================================
 const FIREBASE_CONFIG = Object.freeze({
   apiKey: "AIzaSyBSC-OGbSo_8wJlv9nSLJ8lUojcEKimOBQ",
@@ -46,55 +34,73 @@ const FIREBASE_CONFIG = Object.freeze({
   appId: "1:619255898589:web:24605a66f71f9f9ae71634"
 });
 
-// Debe ser exactamente el ID de la base Firestore donde publicas las reglas.
-// Si tu base es la predeterminada, cambia esta línea a "(default)".
 const DATABASE_ID = "automindcolab";
+const APP_NAME = "automind-firestore-app";
 
-const APP_NAME = "automind-colab-firestore";
+const DATE_COLLECTION_PREFIX = "AutoMind_Data_";
+const JSON_COLLECTION_NAME = "JSON";
+
+const CONSULTAR_IP_PUBLICA = true;
+const INCLUIR_GPU = true;
+const INCLUIR_RED = true;
+
 const IP_ENDPOINT = "https://api.ipify.org?format=json";
 const IP_TIMEOUT_MS = 8000;
 
 
 // ============================================================
-// FECHA
+// UTILIDADES DE FECHA Y RUTA FIRESTORE
 // ============================================================
-function fechaHoraConsulta() {
-  const ahora = new Date();
+function getPartesFecha(ahora = new Date()) {
+  const dd = String(ahora.getDate()).padStart(2, "0");
+  const mm = String(ahora.getMonth() + 1).padStart(2, "0");
+  const yyyy = String(ahora.getFullYear());
 
-  const dia = String(ahora.getDate()).padStart(2, "0");
-  const mes = String(ahora.getMonth() + 1).padStart(2, "0");
-  const anio = String(ahora.getFullYear());
-  const hora = String(ahora.getHours()).padStart(2, "0");
-  const minuto = String(ahora.getMinutes()).padStart(2, "0");
-  const segundo = String(ahora.getSeconds()).padStart(2, "0");
-
-  return `${dia}-${mes}-${anio}-${hora}:${minuto}:${segundo}`;
+  return {
+    dd,
+    mm,
+    yyyy
+  };
 }
 
 
-function fechaParaColeccion() {
-  const ahora = new Date();
-
-  const dia = String(ahora.getDate()).padStart(2, "0");
-  const mes = String(ahora.getMonth() + 1).padStart(2, "0");
-  const anio = String(ahora.getFullYear());
-
-  return `${dia}-${mes}-${anio}`;
+function getFechaColeccion(ahora = new Date()) {
+  const { dd, mm, yyyy } = getPartesFecha(ahora);
+  return `${DATE_COLLECTION_PREFIX}${dd}-${mm}-${yyyy}`;
 }
 
 
-function fechaValida(fecha) {
-  return (
-    typeof fecha === "string" &&
-    /^\d{2}-\d{2}-\d{4}$/.test(fecha)
-  );
+function getFechaHoraConsulta(ahora = new Date()) {
+  const { dd, mm, yyyy } = getPartesFecha(ahora);
+
+  const hh = String(ahora.getHours()).padStart(2, "0");
+  const min = String(ahora.getMinutes()).padStart(2, "0");
+  const ss = String(ahora.getSeconds()).padStart(2, "0");
+
+  return `${dd}-${mm}-${yyyy}-${hh}:${min}:${ss}`;
+}
+
+
+function limpiarSegmentoRuta(valor, fallback) {
+  const limpio = String(valor || "")
+    .trim()
+    .replace(/[^0-9A-Za-z:._-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return limpio || fallback;
+}
+
+
+function getDocumentoIP(ipPublica) {
+  return `IP_${limpiarSegmentoRuta(ipPublica, "No_disponible")}`;
 }
 
 
 // ============================================================
-// USER_INFO: DATOS EXPUESTOS POR EL NAVEGADOR
+// UTILIDADES DE NAVEGADOR
 // ============================================================
-function sistemaOperativoAproximado() {
+function getOSApprox() {
   const ua = navigator.userAgent || "";
 
   if (ua.includes("Windows NT 10.0")) return "Windows 10/11";
@@ -110,31 +116,31 @@ function sistemaOperativoAproximado() {
 }
 
 
-function arquitecturaDesdeUserAgent(noDisponible) {
+function getArchitectureFromUserAgent(unavailable) {
   const ua = navigator.userAgent || "";
 
   if (/ARM64|aarch64/i.test(ua)) return "ARM64";
   if (/Win64|x86_64|x64|amd64/i.test(ua)) return "x86_64";
   if (/i[3-6]86|x86/i.test(ua)) return "x86";
 
-  return noDisponible;
+  return unavailable;
 }
 
 
-async function arquitectura(noDisponible) {
+async function getArchitecture(unavailable) {
   try {
     if (navigator.userAgentData?.getHighEntropyValues) {
-      const datos = await navigator.userAgentData.getHighEntropyValues([
+      const data = await navigator.userAgentData.getHighEntropyValues([
         "architecture",
         "bitness"
       ]);
 
-      const arch = String(datos.architecture || "").trim();
-      const bits = String(datos.bitness || "").trim();
+      const architecture = String(data.architecture || "").trim();
+      const bitness = String(data.bitness || "").trim();
 
       const resultado = [
-        arch,
-        bits ? `${bits}-bit` : null
+        architecture,
+        bitness ? `${bitness}-bit` : null
       ]
         .filter(Boolean)
         .join(" ");
@@ -143,99 +149,111 @@ async function arquitectura(noDisponible) {
         return resultado;
       }
     }
-  } catch (_) {
-    // Usa el fallback basado en userAgent.
-  }
 
-  return arquitecturaDesdeUserAgent(noDisponible);
+    return getArchitectureFromUserAgent(unavailable);
+
+  } catch {
+    return getArchitectureFromUserAgent(unavailable);
+  }
 }
 
 
-function gpu(noDisponible) {
+function getGPU(unavailable) {
   try {
     const canvas = document.createElement("canvas");
+
     const gl =
       canvas.getContext("webgl") ||
       canvas.getContext("experimental-webgl");
 
     if (!gl) {
-      return noDisponible;
+      return unavailable;
     }
 
-    const extension = gl.getExtension("WEBGL_debug_renderer_info");
+    const debugInfo = gl.getExtension(
+      "WEBGL_debug_renderer_info"
+    );
 
-    if (!extension) {
-      return noDisponible;
+    if (!debugInfo) {
+      return unavailable;
     }
 
-    const vendor = gl.getParameter(extension.UNMASKED_VENDOR_WEBGL);
-    const renderer = gl.getParameter(extension.UNMASKED_RENDERER_WEBGL);
+    const vendor = gl.getParameter(
+      debugInfo.UNMASKED_VENDOR_WEBGL
+    );
 
-    return vendor || renderer
-      ? `${vendor || "Sin vendor"} | ${renderer || "Sin renderer"}`
-      : noDisponible;
+    const renderer = gl.getParameter(
+      debugInfo.UNMASKED_RENDERER_WEBGL
+    );
 
-  } catch (_) {
-    return noDisponible;
+    if (!vendor && !renderer) {
+      return unavailable;
+    }
+
+    return `${vendor || "Sin vendor"} | ${renderer || "Sin renderer"}`;
+
+  } catch {
+    return unavailable;
   }
 }
 
 
-function red(noDisponible) {
-  const conexion =
+function getNetwork(unavailable) {
+  const connection =
     navigator.connection ||
     navigator.mozConnection ||
     navigator.webkitConnection;
 
-  if (!conexion) {
+  if (!connection) {
     return {
-      tipo: noDisponible,
-      latencia: noDisponible,
-      anchoBanda: noDisponible
+      type: unavailable,
+      rtt: unavailable,
+      downlink: unavailable
     };
   }
 
   return {
-    tipo: conexion.effectiveType || noDisponible,
-    latencia:
-      typeof conexion.rtt === "number"
-        ? `${conexion.rtt} ms`
-        : noDisponible,
-    anchoBanda:
-      typeof conexion.downlink === "number"
-        ? `${conexion.downlink} Mbps`
-        : noDisponible
+    type: connection.effectiveType || unavailable,
+    rtt:
+      typeof connection.rtt === "number"
+        ? `${connection.rtt} ms`
+        : unavailable,
+    downlink:
+      typeof connection.downlink === "number"
+        ? `${connection.downlink} Mbps`
+        : unavailable
   };
 }
 
 
-function pantalla(noDisponible) {
+function getScreenInfo(unavailable) {
   try {
     if (typeof screen === "undefined") {
-      return noDisponible;
+      return unavailable;
     }
 
-    const ancho = screen.width || noDisponible;
-    const alto = screen.height || noDisponible;
-    const escala = window.devicePixelRatio || 1;
+    const width = screen.width || unavailable;
+    const height = screen.height || unavailable;
+    const scale = window.devicePixelRatio || 1;
 
-    return `${ancho}×${alto} @ ${escala}x`;
-  } catch (_) {
-    return noDisponible;
+    return `${width}x${height} @ ${scale}x`;
+
+  } catch {
+    return unavailable;
   }
 }
 
 
-// ============================================================
-// IP PÚBLICA Y NOMBRE DEL DOCUMENTO PADRE
-// ============================================================
-async function obtenerIPPublica() {
+async function getPublicIP(unavailable) {
+  if (!CONSULTAR_IP_PUBLICA) {
+    return "No consultada";
+  }
+
   const controller = new AbortController();
 
-  const timeout = window.setTimeout(
-    () => controller.abort(),
-    IP_TIMEOUT_MS
-  );
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, IP_TIMEOUT_MS);
 
   try {
     const response = await fetch(IP_ENDPOINT, {
@@ -244,145 +262,109 @@ async function obtenerIPPublica() {
     });
 
     if (!response.ok) {
-      return "Sin_IP";
+      return unavailable;
     }
 
     const data = await response.json();
 
-    return (
-      typeof data?.ip === "string" &&
-      data.ip.trim()
-    )
-      ? data.ip.trim()
-      : "Sin_IP";
+    return data?.ip || unavailable;
 
-  } catch (_) {
-    return "Sin_IP";
+  } catch {
+    return unavailable;
 
   } finally {
-    window.clearTimeout(timeout);
+    clearTimeout(timeoutId);
   }
 }
 
 
-function crearNombreDocumentoIP(ipPublica) {
-  const ipSegura = (
-    typeof ipPublica === "string" &&
-    ipPublica.trim()
-  )
-    ? ipPublica.trim()
-    : "Sin_IP";
+async function asegurarAutenticacion(app) {
+  const auth = getAuth(app);
 
-  return (
-    "IP_" +
-    ipSegura
-      .replace(/[^0-9A-Za-z:._-]/g, "_")
-      .replace(/:/g, "-")
-  );
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+
+  const credencial = await signInAnonymously(auth);
+  return credencial.user;
 }
 
 
-async function recopilarUserInfo() {
-  const noDisponible = "No disponible";
+// ============================================================
+// RECOLECCION DE User_Info
+// ============================================================
+async function recopilarUserInfo(ahora = new Date()) {
+  const unavailable = "No disponible";
 
-  const [arquitecturaExpuesta, ipPublica] = await Promise.all([
-    arquitectura(noDisponible),
-    obtenerIPPublica()
+  const [architecture, publicIP] = await Promise.all([
+    getArchitecture(unavailable),
+    getPublicIP(unavailable)
   ]);
 
-  const datosRed = red(noDisponible);
+  const network = INCLUIR_RED
+    ? getNetwork(unavailable)
+    : {
+        type: "No consultada",
+        rtt: "No consultada",
+        downlink: "No consultada"
+      };
 
   return {
-    "Fecha de Ejecucion": fechaHoraConsulta(),
+    "Fecha de Ejecucion": getFechaHoraConsulta(ahora),
+
     "Zona horaria":
-      Intl.DateTimeFormat().resolvedOptions().timeZone ||
-      noDisponible,
+      Intl.DateTimeFormat()
+        .resolvedOptions()
+        .timeZone || unavailable,
+
     "Idiomas del navegador":
       navigator.languages?.join(", ") ||
       navigator.language ||
-      noDisponible,
+      unavailable,
+
     "Sistema operativo aproximado":
-      sistemaOperativoAproximado(),
+      getOSApprox(),
+
     "Arquitectura expuesta":
-      arquitecturaExpuesta,
-    "Procesadores lógicos expuestos al navegador":
-      navigator.hardwareConcurrency || noDisponible,
+      architecture,
+
+    "Procesadores logicos expuestos al navegador":
+      navigator.hardwareConcurrency || unavailable,
+
     "RAM aproximada expuesta":
       navigator.deviceMemory
         ? `${navigator.deviceMemory} GB`
-        : noDisponible,
+        : unavailable,
+
     "GPU usada por Chrome":
-      gpu(noDisponible),
-    "Resolución de pantalla / escala":
-      pantalla(noDisponible),
+      INCLUIR_GPU
+        ? getGPU(unavailable)
+        : "No consultada",
+
+    "Resolucion de pantalla / escala":
+      getScreenInfo(unavailable),
+
     "Tipo de red estimado":
-      datosRed.tipo,
+      network.type,
+
     "Latencia estimada":
-      datosRed.latencia,
+      network.rtt,
+
     "Ancho de banda estimado":
-      datosRed.anchoBanda,
-    "IP pública":
-      ipPublica
+      network.downlink,
+
+    "IP publica":
+      publicIP
   };
 }
 
 
 // ============================================================
-// FIREBASE
+// FUNCION PUBLICA
+// Solo recibe AutoMind_Info.
+// Devuelve resultado, pero no imprime nada.
 // ============================================================
-function limpiarAutoMindInfo(autoMindInfo) {
-  if (
-    !autoMindInfo ||
-    typeof autoMindInfo !== "object" ||
-    Array.isArray(autoMindInfo)
-  ) {
-    return {
-      Estado: "AutoMind_Info no encontrada"
-    };
-  }
-
-  try {
-    return JSON.parse(JSON.stringify(autoMindInfo));
-  } catch (_) {
-    return {
-      Estado: "AutoMind_Info no serializable"
-    };
-  }
-}
-
-
-async function asegurarAuthAnonima(auth) {
-  const user = auth.currentUser
-    ? auth.currentUser
-    : (await signInAnonymously(auth)).user;
-
-  // Fuerza un token antes del addDoc(); las reglas requieren request.auth.
-  await user.getIdToken(true);
-
-  return user;
-}
-
-
-function errorResult(error, stage) {
-  return {
-    ok: false,
-    code: error?.code || "unknown-error",
-    message: error?.message || String(error),
-    stage,
-    databaseId: DATABASE_ID
-  };
-}
-
-
-// ============================================================
-// FUNCIÓN EXPORTADA
-// ============================================================
-export async function enviarAutoMindFirestore(
-  autoMindInfo = {},
-  fechaLocal = null
-) {
-  let stage = "inicio";
-
+export async function enviarAutoMindFirestore(autoMindInfo = {}) {
   try {
     if (
       typeof window === "undefined" ||
@@ -391,72 +373,64 @@ export async function enviarAutoMindFirestore(
       return {
         ok: false,
         code: "browser-required",
-        message: "Esta función debe ejecutarse en el navegador.",
-        stage
+        message: "Esta funcion debe ejecutarse desde un navegador."
       };
     }
 
-    stage = "firebase-app";
+    const firebaseAppExiste = getApps().some(
+      (app) => app.name === APP_NAME
+    );
 
-    const app = getApps().some(
-      (firebaseApp) => firebaseApp.name === APP_NAME
-    )
+    const app = firebaseAppExiste
       ? getApp(APP_NAME)
       : initializeApp(FIREBASE_CONFIG, APP_NAME);
 
-    const db = DATABASE_ID === "(default)"
-      ? getFirestore(app)
-      : getFirestore(app, DATABASE_ID);
+    await asegurarAutenticacion(app);
 
-    const auth = getAuth(app);
+    const db = getFirestore(app, DATABASE_ID);
+    const ahora = new Date();
 
-    stage = "auth-anonima";
-    const user = await asegurarAuthAnonima(auth);
+    const userInfo = await recopilarUserInfo(ahora);
 
-    stage = "recolectar-user-info";
-    const userInfo = await recopilarUserInfo();
+    const fechaColeccion = getFechaColeccion(ahora);
+    const documentoIP = getDocumentoIP(userInfo["IP publica"]);
 
-    const fecha = fechaValida(fechaLocal)
-      ? fechaLocal
-      : fechaParaColeccion();
+    const autoMindInfoSeguro =
+      autoMindInfo &&
+      typeof autoMindInfo === "object" &&
+      !Array.isArray(autoMindInfo)
+        ? autoMindInfo
+        : {
+            Estado: "AutoMind_Info no encontrada"
+          };
 
-    const nombreColeccion = `AutoMind_Data_${fecha}`;
-    const documentoIP = crearNombreDocumentoIP(
-      userInfo["IP pública"]
+    const referenciaJSON = collection(
+      db,
+      fechaColeccion,
+      documentoIP,
+      JSON_COLLECTION_NAME
     );
 
-    stage = "escritura-firestore";
-
     const documento = await addDoc(
-      collection(
-        db,
-        nombreColeccion,
-        documentoIP,
-        "JSON"
-      ),
+      referenciaJSON,
       {
-        AutoMind_Info: limpiarAutoMindInfo(autoMindInfo),
+        AutoMind_Info: autoMindInfoSeguro,
         User_Info: userInfo,
         timestamp_servidor: serverTimestamp()
       }
     );
 
-    // Solo retorna éxito cuando Firestore confirma las escrituras pendientes.
-    await waitForPendingWrites(db);
-
     return {
       ok: true,
-      code: "ok",
-      message: "Registro guardado correctamente.",
-      stage,
-      collectionName: nombreColeccion,
-      ipDocument: documentoIP,
       documentId: documento.id,
-      databaseId: DATABASE_ID,
-      authUid: user.uid
+      path: `${fechaColeccion}/${documentoIP}/${JSON_COLLECTION_NAME}/${documento.id}`
     };
 
   } catch (error) {
-    return errorResult(error, stage);
+    return {
+      ok: false,
+      code: error?.code || "unknown-error",
+      message: error?.message || String(error)
+    };
   }
 }
