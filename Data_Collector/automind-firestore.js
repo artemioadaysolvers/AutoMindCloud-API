@@ -1,6 +1,6 @@
 // automind-firestore.js
-// Envía AutoMind_Info + información del navegador a Firestore.
-// No imprime nada en consola ni muestra mensajes visuales.
+// Envía AutoMind_Info + User_Info a Firestore.
+// No escribe en consola ni muestra mensajes visuales.
 
 import {
   initializeApp,
@@ -19,14 +19,14 @@ import {
 // ============================================================
 // CONFIGURACIÓN FIJA DEL PROYECTO
 // ============================================================
-const FIREBASE_CONFIG = {
+const FIREBASE_CONFIG = Object.freeze({
   apiKey: "AIzaSyBSC-OGbSo_8wJlv9nSLJ8lUojcEKimOBQ",
   authDomain: "automindrobotics.firebaseapp.com",
   projectId: "automindrobotics",
   storageBucket: "automindrobotics.firebasestorage.app",
   messagingSenderId: "619255898589",
   appId: "1:619255898589:web:24605a66f71f9f9ae71634"
-};
+});
 
 const DATABASE_ID = "automindcolab";
 const COLLECTION_NAME = "automind_data";
@@ -36,9 +36,12 @@ const CONSULTAR_IP_PUBLICA = true;
 const INCLUIR_GPU = true;
 const INCLUIR_RED = true;
 
+const IP_ENDPOINT = "https://api.ipify.org?format=json";
+const IP_TIMEOUT_MS = 8000;
+
 
 // ============================================================
-// INFORMACIÓN DEL NAVEGADOR
+// UTILIDADES
 // ============================================================
 function getFechaHoraConsulta() {
   const ahora = new Date();
@@ -46,6 +49,7 @@ function getFechaHoraConsulta() {
   const dd = String(ahora.getDate()).padStart(2, "0");
   const mm = String(ahora.getMonth() + 1).padStart(2, "0");
   const yyyy = ahora.getFullYear();
+
   const hh = String(ahora.getHours()).padStart(2, "0");
   const min = String(ahora.getMinutes()).padStart(2, "0");
   const ss = String(ahora.getSeconds()).padStart(2, "0");
@@ -70,6 +74,17 @@ function getOSApprox() {
 }
 
 
+function getArchitectureFromUserAgent(unavailable) {
+  const ua = navigator.userAgent || "";
+
+  if (/ARM64|aarch64/i.test(ua)) return "ARM64";
+  if (/Win64|x86_64|x64|amd64/i.test(ua)) return "x86_64";
+  if (/i[3-6]86|x86/i.test(ua)) return "x86";
+
+  return unavailable;
+}
+
+
 async function getArchitecture(unavailable) {
   try {
     if (navigator.userAgentData?.getHighEntropyValues) {
@@ -78,24 +93,25 @@ async function getArchitecture(unavailable) {
         "bitness"
       ]);
 
-      return [
-        data.architecture,
-        data.bitness ? `${data.bitness}-bit` : null
+      const architecture = String(data.architecture || "").trim();
+      const bitness = String(data.bitness || "").trim();
+
+      const resultado = [
+        architecture,
+        bitness ? `${bitness}-bit` : null
       ]
         .filter(Boolean)
-        .join(" ") || unavailable;
+        .join(" ");
+
+      if (resultado) {
+        return resultado;
+      }
     }
 
-    const ua = navigator.userAgent || "";
-
-    if (/Win64|x86_64|x64/i.test(ua)) return "x86_64";
-    if (/ARM64|aarch64/i.test(ua)) return "ARM64";
-    if (/x86/i.test(ua)) return "x86";
-
-    return unavailable;
+    return getArchitectureFromUserAgent(unavailable);
 
   } catch {
-    return unavailable;
+    return getArchitectureFromUserAgent(unavailable);
   }
 }
 
@@ -128,7 +144,11 @@ function getGPU(unavailable) {
       debugInfo.UNMASKED_RENDERER_WEBGL
     );
 
-    return `${vendor} | ${renderer}`;
+    if (!vendor && !renderer) {
+      return unavailable;
+    }
+
+    return `${vendor || "Sin vendor"} | ${renderer || "Sin renderer"}`;
 
   } catch {
     return unavailable;
@@ -164,24 +184,17 @@ function getNetwork(unavailable) {
 }
 
 
-async function getPublicIP(unavailable) {
-  if (!CONSULTAR_IP_PUBLICA) {
-    return "No consultada";
-  }
-
+function getScreenInfo(unavailable) {
   try {
-    const response = await fetch(
-      "https://api.ipify.org?format=json",
-      { cache: "no-store" }
-    );
-
-    if (!response.ok) {
+    if (typeof screen === "undefined") {
       return unavailable;
     }
 
-    const data = await response.json();
+    const width = screen.width || unavailable;
+    const height = screen.height || unavailable;
+    const scale = window.devicePixelRatio || 1;
 
-    return data.ip || unavailable;
+    return `${width}×${height} @ ${scale}x`;
 
   } catch {
     return unavailable;
@@ -189,6 +202,43 @@ async function getPublicIP(unavailable) {
 }
 
 
+async function getPublicIP(unavailable) {
+  if (!CONSULTAR_IP_PUBLICA) {
+    return "No consultada";
+  }
+
+  const controller = new AbortController();
+
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, IP_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(IP_ENDPOINT, {
+      cache: "no-store",
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      return unavailable;
+    }
+
+    const data = await response.json();
+
+    return data?.ip || unavailable;
+
+  } catch {
+    return unavailable;
+
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+
+// ============================================================
+// RECOLECCIÓN DE User_Info
+// ============================================================
 async function recopilarUserInfo() {
   const unavailable = "No disponible";
 
@@ -238,7 +288,7 @@ async function recopilarUserInfo() {
         : "No consultada",
 
     "Resolución de pantalla / escala":
-      `${screen.width}×${screen.height} @ ${window.devicePixelRatio}x`,
+      getScreenInfo(unavailable),
 
     "Tipo de red estimado":
       network.type,
@@ -257,10 +307,22 @@ async function recopilarUserInfo() {
 
 // ============================================================
 // FUNCIÓN PÚBLICA
-// Solo recibe AutoMind_Info y envía todo silenciosamente.
+// Solo recibe AutoMind_Info.
+// Devuelve resultado, pero no imprime nada.
 // ============================================================
 export async function enviarAutoMindFirestore(autoMindInfo = {}) {
   try {
+    if (
+      typeof window === "undefined" ||
+      typeof navigator === "undefined"
+    ) {
+      return {
+        ok: false,
+        code: "browser-required",
+        message: "Esta función debe ejecutarse desde un navegador."
+      };
+    }
+
     const firebaseAppExiste = getApps().some(
       (app) => app.name === APP_NAME
     );
@@ -282,7 +344,7 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
             Estado: "AutoMind_Info no encontrada"
           };
 
-    await addDoc(
+    const documento = await addDoc(
       collection(db, COLLECTION_NAME),
       {
         AutoMind_Info: autoMindInfoSeguro,
@@ -291,9 +353,16 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
       }
     );
 
-    return true;
+    return {
+      ok: true,
+      documentId: documento.id
+    };
 
-  } catch {
-    return false;
+  } catch (error) {
+    return {
+      ok: false,
+      code: error?.code || "unknown-error",
+      message: error?.message || String(error)
+    };
   }
 }
