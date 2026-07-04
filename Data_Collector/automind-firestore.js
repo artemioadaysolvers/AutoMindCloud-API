@@ -1,10 +1,10 @@
 // automind-firestore.js
 // Envia AutoMind_Info + User_Info a Firestore.
-// Guarda en: AutoMind_Data_DD-MM-AAAA / IP_xxx / JSON / documento
+// Guarda en: AutoMind_Data_DD-MM-AAAA / IP_xxx / ID_xxx
 // No escribe en consola ni muestra mensajes visuales.
 
 import {
-  initializeApp, 
+  initializeApp,
   getApps,
   getApp
 } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js";
@@ -16,8 +16,8 @@ import {
 
 import {
   getFirestore,
-  collection,
-  addDoc,
+  doc,
+  setDoc,
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
 
@@ -36,10 +36,9 @@ const FIREBASE_CONFIG = Object.freeze({
 
 const DATABASE_ID = "automindcolab";
 const APP_NAME = "automind-firestore-app";
-const MODULE_VERSION = "automind-firestore-fecha-ip-json-2026-07-03-01";
+const MODULE_VERSION = "automind-firestore-fecha-ip-id-2026-07-04-01";
 
 const DATE_COLLECTION_PREFIX = "AutoMind_Data_";
-const JSON_COLLECTION_NAME = "JSON";
 
 const CONSULTAR_IP_PUBLICA = true;
 const INCLUIR_GPU = true;
@@ -81,6 +80,20 @@ function getFechaHoraConsulta(ahora = new Date()) {
   const ss = String(ahora.getSeconds()).padStart(2, "0");
 
   return `${dd}-${mm}-${yyyy}-${hh}:${min}:${ss}`;
+}
+
+
+function getRegistroId(ahora = new Date()) {
+  const { dd, mm, yyyy } = getPartesFecha(ahora);
+  const hh = String(ahora.getHours()).padStart(2, "0");
+  const min = String(ahora.getMinutes()).padStart(2, "0");
+  const ss = String(ahora.getSeconds()).padStart(2, "0");
+
+  const random =
+    crypto?.randomUUID?.().replace(/-/g, "").slice(0, 12) ||
+    Math.random().toString(36).slice(2, 14);
+
+  return `ID_${dd}-${mm}-${yyyy}_${hh}-${min}-${ss}_${random}`;
 }
 
 
@@ -431,20 +444,26 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
             Estado: "AutoMind_Info no encontrada"
           };
 
-    const referenciaJSON = collection(
+    const registroId = getRegistroId(ahora);
+
+    const referenciaIP = doc(
       db,
       fechaColeccion,
-      documentoIP,
-      JSON_COLLECTION_NAME
+      documentoIP
     );
 
-    const documento = await conTimeout(
-      addDoc(
-        referenciaJSON,
+    await conTimeout(
+      setDoc(
+        referenciaIP,
         {
-          AutoMind_Info: autoMindInfoSeguro,
-          User_Info: userInfo,
-          timestamp_servidor: serverTimestamp()
+          [registroId]: {
+            AutoMind_Info: autoMindInfoSeguro,
+            User_Info: userInfo,
+            timestamp_servidor: serverTimestamp()
+          }
+        },
+        {
+          merge: true
         }
       ),
       FIRESTORE_TIMEOUT_MS,
@@ -454,8 +473,9 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
     return {
       ok: true,
       version: MODULE_VERSION,
-      documentId: documento.id,
-      path: `${fechaColeccion}/${documentoIP}/${JSON_COLLECTION_NAME}/${documento.id}`
+      documentId: documentoIP,
+      registroId,
+      path: `${fechaColeccion}/${documentoIP}/${registroId}`
     };
 
   } catch (error) {
