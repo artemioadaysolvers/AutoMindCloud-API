@@ -1,6 +1,15 @@
 // automind-firestore.js
 // Envía AutoMind_Info + User_Info a Firestore.
-// No escribe en consola ni muestra mensajes visuales.
+// No muestra mensajes visuales ni escribe en consola.
+//
+// Estructura:
+// AutoMind_Data_DD-MM-AAAA
+// └── IP_xxx.xxx.xxx.xxx
+//     └── JSON
+//         └── documento automático
+//
+// El documento IP_... no recibe campos.
+// Solo actúa como padre visual de la subcolección JSON.
 
 import {
   initializeApp,
@@ -14,6 +23,11 @@ import {
   addDoc,
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
+
+import {
+  getAuth,
+  signInAnonymously
+} from "https://www.gstatic.com/firebasejs/9.22.0/firebase-auth.js";
 
 
 // ============================================================
@@ -29,7 +43,6 @@ const FIREBASE_CONFIG = Object.freeze({
 });
 
 const DATABASE_ID = "automindcolab";
-const COLLECTION_NAME = "automind_data";
 const APP_NAME = "automind-firestore-app";
 
 const CONSULTAR_IP_PUBLICA = true;
@@ -41,7 +54,7 @@ const IP_TIMEOUT_MS = 8000;
 
 
 // ============================================================
-// UTILIDADES
+// UTILIDADES DE FECHA
 // ============================================================
 function getFechaHoraConsulta() {
   const ahora = new Date();
@@ -58,6 +71,37 @@ function getFechaHoraConsulta() {
 }
 
 
+function getFechaParaColeccion() {
+  const ahora = new Date();
+
+  const dd = String(ahora.getDate()).padStart(2, "0");
+  const mm = String(ahora.getMonth() + 1).padStart(2, "0");
+  const yyyy = ahora.getFullYear();
+
+  return `${dd}-${mm}-${yyyy}`;
+}
+
+
+function fechaEsValida(fecha) {
+  return (
+    typeof fecha === "string" &&
+    /^\d{2}-\d{2}-\d{4}$/.test(fecha)
+  );
+}
+
+
+function resolverFechaColeccion(fechaLocal) {
+  if (fechaEsValida(fechaLocal)) {
+    return fechaLocal;
+  }
+
+  return getFechaParaColeccion();
+}
+
+
+// ============================================================
+// UTILIDADES DEL NAVEGADOR
+// ============================================================
 function getOSApprox() {
   const ua = navigator.userAgent || "";
 
@@ -93,8 +137,13 @@ async function getArchitecture(unavailable) {
         "bitness"
       ]);
 
-      const architecture = String(data.architecture || "").trim();
-      const bitness = String(data.bitness || "").trim();
+      const architecture = String(
+        data.architecture || ""
+      ).trim();
+
+      const bitness = String(
+        data.bitness || ""
+      ).trim();
 
       const resultado = [
         architecture,
@@ -148,7 +197,10 @@ function getGPU(unavailable) {
       return unavailable;
     }
 
-    return `${vendor || "Sin vendor"} | ${renderer || "Sin renderer"}`;
+    return (
+      `${vendor || "Sin vendor"} | ` +
+      `${renderer || "Sin renderer"}`
+    );
 
   } catch {
     return unavailable;
@@ -172,10 +224,12 @@ function getNetwork(unavailable) {
 
   return {
     type: connection.effectiveType || unavailable,
+
     rtt:
       typeof connection.rtt === "number"
         ? `${connection.rtt} ms`
         : unavailable,
+
     downlink:
       typeof connection.downlink === "number"
         ? `${connection.downlink} Mbps`
@@ -202,6 +256,9 @@ function getScreenInfo(unavailable) {
 }
 
 
+// ============================================================
+// IP PÚBLICA Y NOMBRE DEL DOCUMENTO IP
+// ============================================================
 async function getPublicIP(unavailable) {
   if (!CONSULTAR_IP_PUBLICA) {
     return "No consultada";
@@ -225,7 +282,15 @@ async function getPublicIP(unavailable) {
 
     const data = await response.json();
 
-    return data?.ip || unavailable;
+    if (
+      data &&
+      typeof data.ip === "string" &&
+      data.ip.trim()
+    ) {
+      return data.ip.trim();
+    }
+
+    return unavailable;
 
   } catch {
     return unavailable;
@@ -233,6 +298,35 @@ async function getPublicIP(unavailable) {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+
+function getDocumentoIP(ipPublica) {
+  const ipSegura = (
+    typeof ipPublica === "string" &&
+    ipPublica.trim()
+      ? ipPublica.trim()
+      : "Sin_IP"
+  )
+    .replace(/[^0-9A-Fa-f:.\-]/g, "_")
+    .replace(/:/g, "-")
+    .replace(/\//g, "_");
+
+  return `IP_${ipSegura}`;
+}
+
+
+// ============================================================
+// FIREBASE AUTH ANÓNIMO
+// ============================================================
+async function asegurarAuthAnonimo(auth) {
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+
+  const credencial = await signInAnonymously(auth);
+
+  return credencial.user;
 }
 
 
@@ -307,10 +401,19 @@ async function recopilarUserInfo() {
 
 // ============================================================
 // FUNCIÓN PÚBLICA
-// Solo recibe AutoMind_Info.
-// Devuelve resultado, pero no imprime nada.
+//
+// Recibe:
+//   enviarAutoMindFirestore(autoMindInfo, fechaLocal)
+//
+// Ejemplo:
+//   enviarAutoMindFirestore(info, "03-07-2026")
+//
+// Si fechaLocal no llega o no es válida, usa la fecha del navegador.
 // ============================================================
-export async function enviarAutoMindFirestore(autoMindInfo = {}) {
+export async function enviarAutoMindFirestore(
+  autoMindInfo = {},
+  fechaLocal = null
+) {
   try {
     if (
       typeof window === "undefined" ||
@@ -332,6 +435,9 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
       : initializeApp(FIREBASE_CONFIG, APP_NAME);
 
     const db = getFirestore(app, DATABASE_ID);
+    const auth = getAuth(app);
+
+    await asegurarAuthAnonimo(auth);
 
     const userInfo = await recopilarUserInfo();
 
@@ -344,8 +450,33 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
             Estado: "AutoMind_Info no encontrada"
           };
 
+    const fecha = resolverFechaColeccion(fechaLocal);
+
+    const nombreColeccion = (
+      `AutoMind_Data_${fecha}`
+    );
+
+    const documentoIP = getDocumentoIP(
+      userInfo["IP pública"]
+    );
+
+    /*
+      No se usa setDoc() ni se guardan campos en documentoIP.
+
+      Se escribe directamente en:
+
+      AutoMind_Data_DD-MM-AAAA
+      └── IP_xxx.xxx.xxx.xxx
+          └── JSON
+              └── documento automático
+    */
     const documento = await addDoc(
-      collection(db, COLLECTION_NAME),
+      collection(
+        db,
+        nombreColeccion,
+        documentoIP,
+        "JSON"
+      ),
       {
         AutoMind_Info: autoMindInfoSeguro,
         User_Info: userInfo,
@@ -355,6 +486,8 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
 
     return {
       ok: true,
+      collectionName: nombreColeccion,
+      ipDocument: documentoIP,
       documentId: documento.id
     };
 
