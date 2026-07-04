@@ -4,7 +4,7 @@
 // No escribe en consola ni muestra mensajes visuales.
 
 import {
-  initializeApp,
+  initializeApp, 
   getApps,
   getApp
 } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js";
