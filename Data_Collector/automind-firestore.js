@@ -1,6 +1,6 @@
 // automind-firestore.js
 // Envia AutoMind_Info + User_Info a Firestore.
-// Guarda en: AutoMind_Data_DD-MM-AAAA / IP_xxx / ID_xxx
+// Guarda en: AutoMind_Data_DD-MM-AAAA / IP_xxx / ID_xxx 
 // No escribe en consola ni muestra mensajes visuales.
 
 import {
