@@ -36,6 +36,7 @@ const FIREBASE_CONFIG = Object.freeze({
 
 const DATABASE_ID = "automindcolab";
 const APP_NAME = "automind-firestore-app";
+const MODULE_VERSION = "automind-firestore-fecha-ip-json-2026-07-03-01";
 
 const DATE_COLLECTION_PREFIX = "AutoMind_Data_";
 const JSON_COLLECTION_NAME = "JSON";
@@ -46,6 +47,8 @@ const INCLUIR_RED = true;
 
 const IP_ENDPOINT = "https://api.ipify.org?format=json";
 const IP_TIMEOUT_MS = 8000;
+const AUTH_TIMEOUT_MS = 8000;
+const FIRESTORE_TIMEOUT_MS = 12000;
 
 
 // ============================================================
@@ -94,6 +97,26 @@ function limpiarSegmentoRuta(valor, fallback) {
 
 function getDocumentoIP(ipPublica) {
   return `IP_${limpiarSegmentoRuta(ipPublica, "No_disponible")}`;
+}
+
+
+function conTimeout(promesa, tiempoMs, code) {
+  let timeoutId;
+
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(
+        Object.assign(
+          new Error(`Timeout despues de ${tiempoMs} ms`),
+          { code }
+        )
+      );
+    }, tiempoMs);
+  });
+
+  return Promise.race([promesa, timeout]).finally(() => {
+    clearTimeout(timeoutId);
+  });
 }
 
 
@@ -385,7 +408,11 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
       ? getApp(APP_NAME)
       : initializeApp(FIREBASE_CONFIG, APP_NAME);
 
-    await asegurarAutenticacion(app);
+    await conTimeout(
+      asegurarAutenticacion(app),
+      AUTH_TIMEOUT_MS,
+      "auth-timeout"
+    );
 
     const db = getFirestore(app, DATABASE_ID);
     const ahora = new Date();
@@ -411,17 +438,22 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
       JSON_COLLECTION_NAME
     );
 
-    const documento = await addDoc(
-      referenciaJSON,
-      {
-        AutoMind_Info: autoMindInfoSeguro,
-        User_Info: userInfo,
-        timestamp_servidor: serverTimestamp()
-      }
+    const documento = await conTimeout(
+      addDoc(
+        referenciaJSON,
+        {
+          AutoMind_Info: autoMindInfoSeguro,
+          User_Info: userInfo,
+          timestamp_servidor: serverTimestamp()
+        }
+      ),
+      FIRESTORE_TIMEOUT_MS,
+      "firestore-timeout"
     );
 
     return {
       ok: true,
+      version: MODULE_VERSION,
       documentId: documento.id,
       path: `${fechaColeccion}/${documentoIP}/${JSON_COLLECTION_NAME}/${documento.id}`
     };
@@ -429,6 +461,7 @@ export async function enviarAutoMindFirestore(autoMindInfo = {}) {
   } catch (error) {
     return {
       ok: false,
+      version: MODULE_VERSION,
       code: error?.code || "unknown-error",
       message: error?.message || String(error)
     };
